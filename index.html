@@ -1,0 +1,497 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Cat vs Pickles</title>
+<style>
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; height: 100%;
+    background: #2b2240;
+    font-family: "Trebuchet MS", system-ui, sans-serif;
+    color: #fff;
+    overflow: hidden;
+    touch-action: none;
+  }
+  #wrap {
+    position: relative;
+    width: 100%; height: 100%;
+    display: flex; align-items: center; justify-content: center;
+  }
+  canvas {
+    display: block;
+    max-width: 100%; max-height: 100%;
+    border-radius: 12px;
+    box-shadow: 0 10px 40px rgba(0,0,0,.5);
+  }
+  #overlay {
+    position: absolute; inset: 0;
+    display: flex; flex-direction: column;
+    align-items: center; justify-content: center;
+    text-align: center; padding: 16px;
+    pointer-events: none;
+  }
+  #overlay.hidden { display: none; }
+  #overlay h1 { font-size: clamp(32px, 7vw, 64px); margin: 0 0 8px; text-shadow: 0 4px 0 #1b4d1b; color: #9be36b; }
+  #overlay p { font-size: clamp(16px, 3vw, 22px); margin: 6px 0; text-shadow: 0 2px 0 rgba(0,0,0,.5); }
+  #overlay .hint { opacity: .85; font-size: clamp(14px, 2.4vw, 18px); }
+  #overlay button {
+    pointer-events: auto;
+    margin-top: 18px;
+    font: inherit; font-size: 22px; font-weight: bold;
+    padding: 12px 32px;
+    border: none; border-radius: 999px;
+    background: #ffb347; color: #3a2400;
+    box-shadow: 0 5px 0 #c97a10;
+    cursor: pointer;
+  }
+  #overlay button:active { transform: translateY(3px); box-shadow: 0 2px 0 #c97a10; }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <canvas id="game" width="480" height="720"></canvas>
+  <div id="overlay">
+    <h1>Cat vs Pickles</h1>
+    <p>Pickles are falling from the sky. Cats hate pickles.</p>
+    <p class="hint">← → / A D to move &nbsp;·&nbsp; or drag / tap on mobile</p>
+    <p class="hint">Grab the 🐟 for bonus points!</p>
+    <button id="startBtn">Play</button>
+  </div>
+</div>
+
+<script>
+(() => {
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d');
+  const W = canvas.width, H = canvas.height;
+  const GROUND = H - 70;
+
+  const overlay = document.getElementById('overlay');
+  const startBtn = document.getElementById('startBtn');
+
+  let best = 0;
+  try { best = +localStorage.getItem('catPickleBest') || 0; } catch (e) {}
+
+  // ---------- State ----------
+  let state = 'menu'; // menu | playing | over
+  let cat, pickles, fish, particles, score, lives, time, spawnTimer, fishTimer, invuln, shake;
+
+  function reset() {
+    cat = { x: W / 2, y: GROUND, w: 70, h: 50, vx: 0, facing: 1, blink: 0, tail: 0 };
+    pickles = [];
+    fish = [];
+    particles = [];
+    score = 0;
+    lives = 3;
+    time = 0;
+    spawnTimer = 0;
+    fishTimer = 6;
+    invuln = 0;
+    shake = 0;
+  }
+  reset();
+
+  // ---------- Input ----------
+  const keys = {};
+  let pointerX = null;
+  addEventListener('keydown', e => {
+    keys[e.key.toLowerCase()] = true;
+    if (['arrowleft', 'arrowright', ' '].includes(e.key.toLowerCase())) e.preventDefault();
+    if ((e.key === ' ' || e.key === 'Enter') && state !== 'playing') start();
+  });
+  addEventListener('keyup', e => { keys[e.key.toLowerCase()] = false; });
+
+  function toCanvasX(clientX) {
+    const r = canvas.getBoundingClientRect();
+    return (clientX - r.left) / r.width * W;
+  }
+  canvas.addEventListener('pointerdown', e => { pointerX = toCanvasX(e.clientX); canvas.setPointerCapture(e.pointerId); });
+  canvas.addEventListener('pointermove', e => { if (pointerX !== null || e.pointerType === 'mouse' && e.buttons) pointerX = toCanvasX(e.clientX); });
+  canvas.addEventListener('pointerup', () => { pointerX = null; });
+  canvas.addEventListener('pointercancel', () => { pointerX = null; });
+
+  startBtn.addEventListener('click', start);
+
+  function start() {
+    reset();
+    state = 'playing';
+    overlay.classList.add('hidden');
+  }
+
+  function gameOver() {
+    state = 'over';
+    const final = Math.floor(score);
+    const newBest = final > best;
+    if (newBest) {
+      best = final;
+      try { localStorage.setItem('catPickleBest', best); } catch (e) {}
+    }
+    overlay.innerHTML = `
+      <h1>Pickled!</h1>
+      <p>Score: <b>${final}</b></p>
+      <p>${newBest ? '🏆 New best!' : 'Best: ' + best}</p>
+      <button id="againBtn">Play again</button>`;
+    overlay.classList.remove('hidden');
+    document.getElementById('againBtn').addEventListener('click', start);
+  }
+
+  // ---------- Spawning ----------
+  function difficulty() { return 1 + time / 20; }
+
+  function spawnPickle() {
+    const d = difficulty();
+    const size = 18 + Math.random() * 14;
+    pickles.push({
+      x: 20 + Math.random() * (W - 40),
+      y: -40,
+      r: size,
+      vy: 140 + Math.random() * 80 * d + 40 * d,
+      vx: (Math.random() - .5) * 40 * Math.min(d, 3),
+      rot: Math.random() * Math.PI * 2,
+      vr: (Math.random() - .5) * 5,
+      warts: Array.from({ length: 5 }, () => [Math.random() * 1.6 - .8, Math.random() * .8 - .4])
+    });
+  }
+
+  function spawnFish() {
+    fish.push({ x: 30 + Math.random() * (W - 60), y: -30, vy: 160, t: 0 });
+  }
+
+  function burst(x, y, color, n = 14) {
+    for (let i = 0; i < n; i++) {
+      const a = Math.random() * Math.PI * 2, s = 60 + Math.random() * 180;
+      particles.push({ x, y, vx: Math.cos(a) * s, vy: Math.sin(a) * s - 80, life: .6 + Math.random() * .4, color });
+    }
+  }
+
+  // ---------- Update ----------
+  function update(dt) {
+    time += dt;
+    score += dt * 10;
+
+    // movement
+    const speed = 380;
+    let dir = 0;
+    if (keys['arrowleft'] || keys['a']) dir -= 1;
+    if (keys['arrowright'] || keys['d']) dir += 1;
+    if (pointerX !== null) {
+      const diff = pointerX - cat.x;
+      dir = Math.abs(diff) < 6 ? 0 : Math.sign(diff) * Math.min(1, Math.abs(diff) / 40);
+    }
+    cat.vx += (dir * speed - cat.vx) * Math.min(1, dt * 14);
+    cat.x += cat.vx * dt;
+    cat.x = Math.max(cat.w / 2, Math.min(W - cat.w / 2, cat.x));
+    if (Math.abs(cat.vx) > 10) cat.facing = Math.sign(cat.vx);
+    cat.tail += dt * (3 + Math.abs(cat.vx) / 60);
+    cat.blink -= dt;
+    if (cat.blink < -3 - Math.random() * 3) cat.blink = .15;
+
+    // spawn
+    spawnTimer -= dt;
+    if (spawnTimer <= 0) {
+      spawnPickle();
+      if (Math.random() < Math.min(.4, time / 120)) spawnPickle();
+      spawnTimer = Math.max(.22, .9 - time * .012);
+    }
+    fishTimer -= dt;
+    if (fishTimer <= 0) { spawnFish(); fishTimer = 7 + Math.random() * 6; }
+
+    if (invuln > 0) invuln -= dt;
+    if (shake > 0) shake -= dt;
+
+    // cat hitbox
+    const hb = { x: cat.x - cat.w / 2 + 8, y: cat.y - cat.h - 10, w: cat.w - 16, h: cat.h + 10 };
+
+    // pickles
+    for (let i = pickles.length - 1; i >= 0; i--) {
+      const p = pickles[i];
+      p.y += p.vy * dt;
+      p.x += p.vx * dt;
+      if (p.x < p.r || p.x > W - p.r) p.vx *= -1;
+      p.rot += p.vr * dt;
+
+      if (invuln <= 0 && circleRect(p.x, p.y, p.r * .7, hb)) {
+        pickles.splice(i, 1);
+        lives--;
+        invuln = 1.5;
+        shake = .35;
+        burst(p.x, p.y, '#7cc242', 20);
+        if (lives <= 0) { burst(cat.x, cat.y - 25, '#ffa94d', 30); gameOver(); }
+        continue;
+      }
+      if (p.y > GROUND + 10) {
+        burst(p.x, GROUND + 4, '#a6d96a', 6);
+        pickles.splice(i, 1);
+        score += 2;
+      }
+    }
+
+    // fish
+    for (let i = fish.length - 1; i >= 0; i--) {
+      const f = fish[i];
+      f.t += dt;
+      f.y += f.vy * dt;
+      f.x += Math.sin(f.t * 4) * 60 * dt;
+      if (circleRect(f.x, f.y, 16, hb)) {
+        fish.splice(i, 1);
+        score += 50;
+        burst(f.x, f.y, '#7ec8ff', 16);
+        floating.push({ x: f.x, y: f.y, text: '+50', life: 1 });
+        continue;
+      }
+      if (f.y > GROUND + 20) fish.splice(i, 1);
+    }
+
+    updateParticles(dt);
+  }
+
+  const floating = [];
+  function updateParticles(dt) {
+    for (let i = particles.length - 1; i >= 0; i--) {
+      const p = particles[i];
+      p.vy += 500 * dt;
+      p.x += p.vx * dt; p.y += p.vy * dt;
+      p.life -= dt;
+      if (p.life <= 0) particles.splice(i, 1);
+    }
+    for (let i = floating.length - 1; i >= 0; i--) {
+      floating[i].y -= 40 * dt;
+      floating[i].life -= dt;
+      if (floating[i].life <= 0) floating.splice(i, 1);
+    }
+  }
+
+  function circleRect(cx, cy, r, rc) {
+    const nx = Math.max(rc.x, Math.min(cx, rc.x + rc.w));
+    const ny = Math.max(rc.y, Math.min(cy, rc.y + rc.h));
+    return (cx - nx) ** 2 + (cy - ny) ** 2 < r * r;
+  }
+
+  // ---------- Draw ----------
+  const stars = Array.from({ length: 40 }, () => [Math.random() * W, Math.random() * GROUND * .7, Math.random() * 1.5 + .5]);
+
+  function drawBackground() {
+    const g = ctx.createLinearGradient(0, 0, 0, H);
+    g.addColorStop(0, '#3b2b6b');
+    g.addColorStop(.6, '#ff8a65');
+    g.addColorStop(1, '#ffcc80');
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, W, H);
+
+    ctx.fillStyle = 'rgba(255,255,255,.7)';
+    for (const [x, y, s] of stars) { ctx.beginPath(); ctx.arc(x, y, s, 0, Math.PI * 2); ctx.fill(); }
+
+    // giant jar in background
+    ctx.save();
+    ctx.globalAlpha = .18;
+    ctx.fillStyle = '#c5e1a5';
+    roundRect(W / 2 - 110, 120, 220, 300, 40); ctx.fill();
+    ctx.fillRect(W / 2 - 90, 95, 180, 30);
+    ctx.restore();
+
+    // ground
+    ctx.fillStyle = '#6d4c41';
+    ctx.fillRect(0, GROUND, W, H - GROUND);
+    ctx.fillStyle = '#8d6e63';
+    ctx.fillRect(0, GROUND, W, 10);
+    ctx.fillStyle = 'rgba(0,0,0,.08)';
+    for (let x = 0; x < W; x += 60) ctx.fillRect(x, GROUND + 10, 2, H - GROUND);
+  }
+
+  function roundRect(x, y, w, h, r) {
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.arcTo(x + w, y, x + w, y + h, r);
+    ctx.arcTo(x + w, y + h, x, y + h, r);
+    ctx.arcTo(x, y + h, x, y, r);
+    ctx.arcTo(x, y, x + w, y, r);
+    ctx.closePath();
+  }
+
+  function drawPickle(p) {
+    ctx.save();
+    ctx.translate(p.x, p.y);
+    ctx.rotate(p.rot);
+    const rx = p.r, ry = p.r * .48;
+    ctx.fillStyle = '#4c8c2b';
+    ctx.strokeStyle = '#2e5e17';
+    ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.ellipse(0, 0, rx, ry, 0, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+    ctx.fillStyle = '#7cc242';
+    ctx.beginPath(); ctx.ellipse(-rx * .15, -ry * .3, rx * .65, ry * .35, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#2e5e17';
+    for (const [wx, wy] of p.warts) { ctx.beginPath(); ctx.arc(wx * rx * .7, wy * ry * 1.4, 1.8, 0, Math.PI * 2); ctx.fill(); }
+    ctx.restore();
+  }
+
+  function drawFish(f) {
+    ctx.save();
+    ctx.translate(f.x, f.y);
+    ctx.rotate(Math.sin(f.t * 4) * .3);
+    ctx.fillStyle = '#4fc3f7';
+    ctx.strokeStyle = '#0277bd';
+    ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.ellipse(0, 0, 16, 9, 0, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(12, 0); ctx.lineTo(24, -9); ctx.lineTo(24, 9); ctx.closePath(); ctx.fill(); ctx.stroke();
+    ctx.fillStyle = '#012';
+    ctx.beginPath(); ctx.arc(-8, -2, 2, 0, Math.PI * 2); ctx.fill();
+    ctx.restore();
+    // glow
+    ctx.save();
+    ctx.globalAlpha = .25 + .15 * Math.sin(f.t * 8);
+    ctx.fillStyle = '#fff';
+    ctx.beginPath(); ctx.arc(f.x, f.y, 26, 0, Math.PI * 2); ctx.fill();
+    ctx.restore();
+  }
+
+  function drawCat() {
+    if (invuln > 0 && Math.floor(invuln * 12) % 2 === 0) return;
+    const { x, y, facing } = cat;
+    const scared = pickles.some(p => Math.abs(p.x - x) < 70 && p.y > y - 200 && p.y < y);
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.scale(facing, 1);
+
+    // shadow
+    ctx.fillStyle = 'rgba(0,0,0,.25)';
+    ctx.beginPath(); ctx.ellipse(0, 2, 36, 7, 0, 0, Math.PI * 2); ctx.fill();
+
+    const fur = '#ffa94d', dark = '#d9772b';
+    const bob = Math.abs(cat.vx) > 20 ? Math.sin(time * 18) * 2 : 0;
+
+    // tail
+    ctx.strokeStyle = fur; ctx.lineWidth = 9; ctx.lineCap = 'round';
+    ctx.beginPath();
+    ctx.moveTo(-26, -20);
+    ctx.quadraticCurveTo(-48, -30 + Math.sin(cat.tail) * 8, -44 + Math.sin(cat.tail * 1.3) * 6, scared ? -70 : -52);
+    ctx.stroke();
+
+    // legs
+    ctx.fillStyle = dark;
+    const step = Math.abs(cat.vx) > 20 ? Math.sin(time * 18) * 4 : 0;
+    [[-20, step], [-8, -step], [10, step], [22, -step]].forEach(([lx, o]) => {
+      roundRect(lx - 4, -14 + o * .3, 9, 14, 4); ctx.fill();
+    });
+
+    // body
+    ctx.fillStyle = fur;
+    ctx.beginPath(); ctx.ellipse(0, -22 + bob, 32, 18, 0, 0, Math.PI * 2); ctx.fill();
+    // stripes
+    ctx.strokeStyle = dark; ctx.lineWidth = 3;
+    for (let i = -1; i <= 1; i++) {
+      ctx.beginPath(); ctx.moveTo(i * 10 - 4, -38 + bob); ctx.quadraticCurveTo(i * 10, -30 + bob, i * 10 - 2, -24 + bob); ctx.stroke();
+    }
+
+    // head
+    const hx = 26, hy = -40 + bob;
+    ctx.fillStyle = fur;
+    ctx.beginPath(); ctx.arc(hx, hy, 18, 0, Math.PI * 2); ctx.fill();
+    // ears
+    const earUp = scared ? -8 : 0;
+    ctx.beginPath(); ctx.moveTo(hx - 14, hy - 8); ctx.lineTo(hx - 12, hy - 28 + earUp); ctx.lineTo(hx - 2, hy - 15); ctx.fill();
+    ctx.beginPath(); ctx.moveTo(hx + 2, hy - 15); ctx.lineTo(hx + 12, hy - 28 + earUp); ctx.lineTo(hx + 15, hy - 8); ctx.fill();
+    ctx.fillStyle = '#ffccbc';
+    ctx.beginPath(); ctx.moveTo(hx - 11, hy - 12); ctx.lineTo(hx - 10, hy - 22 + earUp); ctx.lineTo(hx - 5, hy - 15); ctx.fill();
+    ctx.beginPath(); ctx.moveTo(hx + 5, hy - 15); ctx.lineTo(hx + 10, hy - 22 + earUp); ctx.lineTo(hx + 12, hy - 12); ctx.fill();
+
+    // eyes
+    ctx.fillStyle = '#222';
+    if (scared) {
+      ctx.fillStyle = '#fff';
+      ctx.beginPath(); ctx.arc(hx - 5, hy - 2, 5, 0, Math.PI * 2); ctx.fill();
+      ctx.beginPath(); ctx.arc(hx + 8, hy - 2, 5, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = '#222';
+      ctx.beginPath(); ctx.arc(hx - 5, hy - 3, 2, 0, Math.PI * 2); ctx.fill();
+      ctx.beginPath(); ctx.arc(hx + 8, hy - 3, 2, 0, Math.PI * 2); ctx.fill();
+    } else if (cat.blink > 0) {
+      ctx.fillRect(hx - 8, hy - 2, 6, 2);
+      ctx.fillRect(hx + 5, hy - 2, 6, 2);
+    } else {
+      ctx.beginPath(); ctx.ellipse(hx - 5, hy - 2, 2.5, 4, 0, 0, Math.PI * 2); ctx.fill();
+      ctx.beginPath(); ctx.ellipse(hx + 8, hy - 2, 2.5, 4, 0, 0, Math.PI * 2); ctx.fill();
+    }
+    // nose + mouth
+    ctx.fillStyle = '#e57373';
+    ctx.beginPath(); ctx.moveTo(hx + 1, hy + 4); ctx.lineTo(hx + 5, hy + 4); ctx.lineTo(hx + 3, hy + 7); ctx.fill();
+    ctx.strokeStyle = '#5d4037'; ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    if (scared) { ctx.arc(hx + 3, hy + 12, 3, 0, Math.PI * 2); }
+    else { ctx.moveTo(hx - 1, hy + 9); ctx.quadraticCurveTo(hx + 3, hy + 12, hx + 3, hy + 8); ctx.quadraticCurveTo(hx + 3, hy + 12, hx + 7, hy + 9); }
+    ctx.stroke();
+    // whiskers
+    ctx.strokeStyle = 'rgba(255,255,255,.8)'; ctx.lineWidth = 1;
+    [[-2, 0], [2, 3]].forEach(([dy, s]) => {
+      ctx.beginPath(); ctx.moveTo(hx + 10, hy + 6 + dy); ctx.lineTo(hx + 26, hy + 3 + dy * 2 + s); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(hx - 4, hy + 6 + dy); ctx.lineTo(hx - 20, hy + 3 + dy * 2 + s); ctx.stroke();
+    });
+
+    // exclamation when scared
+    if (scared) {
+      ctx.scale(facing, 1);
+      ctx.fillStyle = '#fff';
+      ctx.font = 'bold 22px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillText('!', facing * hx, hy - 34);
+    }
+    ctx.restore();
+  }
+
+  function drawHUD() {
+    ctx.fillStyle = 'rgba(0,0,0,.3)';
+    roundRect(10, 10, W - 20, 44, 12); ctx.fill();
+    ctx.fillStyle = '#fff';
+    ctx.font = 'bold 22px "Trebuchet MS", sans-serif';
+    ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+    ctx.fillText('Score: ' + Math.floor(score), 24, 32);
+    ctx.textAlign = 'center';
+    ctx.font = '15px "Trebuchet MS", sans-serif';
+    ctx.fillText('Best: ' + best, W / 2, 32);
+    ctx.textAlign = 'right';
+    ctx.font = '22px sans-serif';
+    ctx.fillText('❤️'.repeat(Math.max(0, lives)) + '🖤'.repeat(Math.max(0, 3 - lives)), W - 22, 33);
+    ctx.textBaseline = 'alphabetic';
+  }
+
+  function draw() {
+    ctx.save();
+    if (shake > 0) ctx.translate((Math.random() - .5) * 12 * shake / .35, (Math.random() - .5) * 12 * shake / .35);
+    drawBackground();
+    fish.forEach(drawFish);
+    pickles.forEach(drawPickle);
+    if (state !== 'over' || lives > 0) drawCat();
+    for (const p of particles) {
+      ctx.globalAlpha = Math.max(0, p.life);
+      ctx.fillStyle = p.color;
+      ctx.fillRect(p.x - 3, p.y - 3, 6, 6);
+    }
+    ctx.globalAlpha = 1;
+    ctx.fillStyle = '#fff';
+    ctx.font = 'bold 20px "Trebuchet MS", sans-serif';
+    ctx.textAlign = 'center';
+    for (const f of floating) { ctx.globalAlpha = Math.max(0, f.life); ctx.fillText(f.text, f.x, f.y); }
+    ctx.globalAlpha = 1;
+    ctx.restore();
+    if (state === 'playing') drawHUD();
+  }
+
+  // ---------- Loop ----------
+  let last = performance.now();
+  function loop(now) {
+    const dt = Math.min(.05, (now - last) / 1000);
+    last = now;
+    if (state === 'playing') update(dt);
+    else {
+      updateParticles(dt);
+      time += dt;
+      cat.tail += dt * 3;
+    }
+    draw();
+    requestAnimationFrame(loop);
+  }
+  requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>
